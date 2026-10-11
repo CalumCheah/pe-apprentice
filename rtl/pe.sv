@@ -46,18 +46,23 @@ module pe #(
   fxp_add #(QI,QF) u_add (mult_out,    pe_psum_in,    mac_out,  );
 
   // TODO: weight promotion. Which register does the multiplier read?
+  // Promote background weight into active weight register when pe_switch_in=1
 
-  always_comb begin
-    weight_active = '0;
+  always_ff @( posedge clk or posedge rst ) begin
+    if ( rst )
+      weight_active <= '0;
+    else if ( pe_switch_in && pe_enabled )
+      weight_active <= weight_bg; // Promote background weight
   end
 
   // TODO: weight staging. When does weight_bg capture pe_weight_in?
+  // Capture weight into bg register when pe_accept_w_in = 1
 
   always_ff @( posedge clk or posedge rst ) begin
     if ( rst )
       weight_bg <= '0;
-    else
-      weight_bg <= weight_bg;
+    else if ( pe_accept_w_in && pe_enabled )
+      weight_bg <= pe_weight_in;
   end
 
   // TODO: streaming datapath. Drive all five outputs.
@@ -70,9 +75,19 @@ module pe #(
       pe_valid_out  <= 1'b0;
       pe_switch_out <= 1'b0;
     end
-    else if ( !pe_enabled ) begin
+    else if ( !pe_enabled || !pe_valid_in ) begin
+      pe_psum_out   <= pe_psum_in;
+      pe_weight_out <= pe_weight_in;
+      pe_input_out  <= pe_input_in;
+      pe_valid_out  <= pe_valid_in;
+      pe_switch_out <= pe_switch_in;
     end
     else begin
+      pe_psum_out <= mac_out;
+      pe_weight_out <= pe_weight_in;
+      pe_input_out <= pe_input_in;
+      pe_valid_out <= pe_valid_in;
+      pe_switch_out <= pe_switch_in;
     end
   end
 
