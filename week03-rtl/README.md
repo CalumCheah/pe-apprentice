@@ -8,9 +8,7 @@ semester. Everything else is given to you.
 ## 1. Get on the chamber
 
 ```bash
-bash
-qsh -q normal.q -now n -V
-bash
+srun -c 4 --mem=16G --pty bash
 source ~/pe-apprentice/setup.sh
 ```
 

@@ -13,9 +13,7 @@ understand why before continuing.
 ## 1. Setup
 
 ```bash
-bash
-qsh -q normal.q -now n -V
-bash
+srun -c 4 --mem=16G --pty bash
 source ~/pe-apprentice/setup.sh
 mkdir -p ~/pe-apprentice/week09-pnr/work
 cd ~/pe-apprentice/week09-pnr/work
@@ -172,42 +170,111 @@ looking at it than reading about it.
 This is where your week 8 sketch becomes real. Until you do this, every port is
 unplaced and the router treats it as floating.
 
-```tcl
-edit_pin -pin {pe_input_in* pe_valid_in pe_switch_in pe_enabled clk rst} \
-         -side Left -layer 3 -spread_type center -fixed_pin
+Two numbers from the tech LEF decide how the commands below are written. Read
+them yourself; do not take them from here.
 
-edit_pin -pin {pe_psum_in* pe_weight_in* pe_accept_w_in} \
-         -side Top -layer 3 -spread_type center -fixed_pin
-
-edit_pin -pin {pe_psum_out* pe_weight_out*} \
-         -side Bottom -layer 3 -spread_type center -fixed_pin
-
-edit_pin -pin {pe_input_out* pe_valid_out pe_switch_out} \
-         -side Right -layer 3 -spread_type center -fixed_pin
+```bash
+grep -A4 "^LAYER Metal2$" $LEF_TECH
+grep -A4 "^LAYER Metal3$" $LEF_TECH
 ```
 
-West in, north in, south out, east out, matching how a PE sits in the grid. Its
-north neighbour feeds it partial sums, its west neighbour feeds it activations,
-and it feeds the PEs below and to the right.
+`DIRECTION` says which way wires on that layer prefer to run. A pin on the west
+or east edge is reached by a horizontal wire, so it goes on the horizontal
+layer; a north or south pin goes on the vertical one. `PITCH` and `OFFSET`
+define the routing tracks: track `n` sits at `OFFSET + n × PITCH`. A pin
+belongs on a track, and two tracks between pins is the usual minimum that lets
+the router reach a pin without touching its neighbour. `setup.sh` names the two
+layers as `PIN_LAYER_H` and `PIN_LAYER_V`; check them against what you just
+read, and copy the four numbers into the block below.
 
-`-fixed_pin` locks them so later optimization cannot move them. `-layer 3` puts
-them on Metal3, high enough that the router can reach them without fighting the
-Metal1 power rails.
+The other thing a PE's pins have to do is line up with the PE next door: bit
+`i` of `pe_input_in` on the west edge at the same height as bit `i` of
+`pe_input_out` on the east edge, and the same for the two north/south pairs.
+Two PEs placed side by side then connect with straight wires. That is what
+"abuttable" means, and it is why the loop below assigns coordinates instead of
+letting the tool spread the pins for you.
+
+```tcl
+set hL $env(PIN_LAYER_H)
+set vL $env(PIN_LAYER_V)
+set bb [get_db designs .bbox]
+if {[llength $bb] == 1} { set bb [lindex $bb 0] }
+set dieW [lindex $bb 2] ; set dieH [lindex $bb 3]
+set pitchH 0.20 ; set offH 0.10 ;# replace both: PITCH and OFFSET of PIN_LAYER_H, from the grep above
+set pitchV 0.20 ; set offV 0.10 ;# replace both: same two numbers for PIN_LAYER_V
+set n0 [expr {int(ceil((12.0 - $offH) / $pitchH))}] ;# first track past the ring and the corner
+set m0 [expr {int(ceil((12.0 - $offV) / $pitchV))}]
+proc trk {off pitch n} { return [expr {$off + $n * $pitch}] }
+
+proc pin_at {name side layer x y} {
+  edit_pin -pin $name -side $side -layer $layer -assign [list $x $y] -fixed_pin
+}
+# Place the input pin, read back where Innovus actually put it, and give its
+# output partner on the far edge that exact coordinate.
+proc pin_pair {in side_in out side_out layer x y} {
+  global dieW dieH
+  pin_at $in $side_in $layer $x $y
+  set loc [get_db [get_db ports $in] .location]
+  if {[llength $loc] == 1} { set loc [lindex $loc 0] }
+  if {$side_in eq "Left"} { pin_at $out $side_out $layer $dieW [lindex $loc 1] } \
+  else                    { pin_at $out $side_out $layer [lindex $loc 0] 0 }
+}
+for {set i 0} {$i < 16} {incr i} {
+  set y [trk $offH $pitchH [expr {$n0 + 2*$i}]]
+  pin_pair "pe_input_in\[$i\]"  Left "pe_input_out\[$i\]"  Right  $hL 0  $y
+  set x [trk $offV $pitchV [expr {$m0 + 2*$i}]]
+  pin_pair "pe_psum_in\[$i\]"   Top  "pe_psum_out\[$i\]"   Bottom $vL $x $dieH
+  set x [trk $offV $pitchV [expr {$m0 + 2*(18+$i)}]]
+  pin_pair "pe_weight_in\[$i\]" Top  "pe_weight_out\[$i\]" Bottom $vL $x $dieH
+}
+set y [trk $offH $pitchH [expr {$n0 + 2*17}]] ; pin_pair pe_valid_in  Left pe_valid_out  Right $hL 0 $y
+set y [trk $offH $pitchH [expr {$n0 + 2*18}]] ; pin_pair pe_switch_in Left pe_switch_out Right $hL 0 $y
+set x [trk $offV $pitchV [expr {$m0 + 2*36}]] ; pin_at pe_accept_w_in Top $vL $x $dieH
+set y [trk $offH $pitchH [expr {$n0 + 2*20}]] ; pin_at pe_enabled Left $hL 0 $y
+set y [trk $offH $pitchH [expr {$n0 + 2*21}]] ; pin_at clk        Left $hL 0 $y
+set y [trk $offH $pitchH [expr {$n0 + 2*22}]] ; pin_at rst        Left $hL 0 $y
+```
+
+West in, north in, south out, east out, matching how a PE sits in the grid.
+`clk`, `rst` and `pe_enabled` have no neighbour on the other side; in an array
+they arrive from a tree, not from the PE to the left, so they sit apart from
+the bus. `-fixed_pin` locks every pin so later optimization cannot move it.
+
+Why the read-back: Innovus keeps its own routing tracks, and they are not
+always the LEF's. On the lab's kit it built Metal3 tracks at a different pitch
+from the one in the tech LEF and then rounded the west and east edges in
+opposite directions, so two pins assigned the same `y` landed one track apart.
+Asking the tool where it put the first pin and copying that to the partner is
+the only way to be sure they share a track. Check it in `post-pnr.def` later:
+the `PINS` entries for `pe_input_in[0]` and `pe_input_out[0]` must carry the
+same `y`.
 
 ```tcl
 gui_fit
 llength [get_db ports]
 ```
 
-Marks on all four edges, and 104 ports. Confirm the sides look like your sketch.
+Marks on all four edges, and 104 ports. Confirm the sides look like your sketch,
+and that the input bus on the west and the output bus on the east start at the
+same height.
 
-Skip this step and Innovus prints
+**Why not one `edit_pin` per side with `-spread_type center`?** It is shorter,
+and it is what this handout used to say. With no `-spacing`, Innovus packs the
+pins at one track pitch in a bunch at the middle of the edge: run on the lab's
+sky130 kit with this same Innovus release, 21 west pins landed in a 6.8 µm band
+of a 128 µm edge, 33 north pins in 14.7 µm, and because the west edge carries
+21 pins and the east 18, bit 0 of `pe_input_in` sat 3.4 µm away from bit 0 of
+`pe_input_out`. The design routes, but a PE built that way cannot be tiled. A
+bare `-layer 3` is also a layer *index*, and it means a different metal in a
+kit that has a local-interconnect layer. Name layers; never number them.
+
+Skip this step entirely and Innovus prints
 `IMPVFC-97: IO pin pe_psum_in[5] has not been assigned` for every port, then
-routes anyway using a guessed location. On the reference PE, placing pins
-properly moved post-route slack from **−1.470 ns to −0.825 ns**, an improvement
-of 645 ps, because fixed pins give placement something to cluster logic against.
-In a real chip the pin locations are negotiated with the blocks next door and
-are usually fixed before you start, not chosen by you.
+routes anyway using a guessed location. On the reference PE, fixing the pins
+moved post-route slack from **−1.470 ns to −0.825 ns**, 645 ps, because fixed
+pins give placement something to cluster logic against. In a real chip the pin
+locations are negotiated with the blocks next door and are usually fixed before
+you start, not chosen by you.
 
 ## 6. Power
 
@@ -274,7 +341,8 @@ place_opt_design
 
 Puts every cell somewhere, then optimizes timing by resizing cells and inserting
 buffers. A few minutes. The reference PE finishes around **WNS −0.8 ns, density
-93%**.
+93%**. Two `IMPSP-9099` errors about scan chains are printed on every design
+without scan logic in this release; they change nothing and you can ignore them.
 
 Two things to notice. Timing is much worse than the −0.020 from before
 placement, because cells now have positions and the wires between them have
@@ -353,11 +421,36 @@ LEF. Acceptable for this program. A tapeout uses a foundry-characterized table
 and the difference is not small.
 
 ```tcl
-report_timing -nworst 1 > timing_postroute.rpt
-report_area             > area_postroute.rpt
+report_timing -nworst 1        > timing_postroute.rpt
+report_timing -nworst 1 -early > timing_postroute_hold.rpt
+report_area                    > area_postroute.rpt
 ```
 
-## 11. Check that it can be built
+The second report is hold, checked at the fast corner through the `hold_view`
+you set up in step 2. Setup asks whether data arrives in time; hold asks
+whether it arrives too early and races through the flop. Both have to pass for
+the chip to work, and week 10 reports both. If hold is negative here:
+
+```tcl
+opt_design -post_route -hold
+```
+
+inserts delay where data arrives too soon. It is cheap on a design this size.
+
+## 11. Fill, then check that it can be built
+
+```tcl
+add_fillers -base_cells [get_db [get_db base_cells FILL*] .name]
+```
+
+Every empty site in every row gets a filler cell, so the n-well and the power
+rails are continuous from one end of the row to the other. A row with gaps in
+it fails DRC at the foundry even when the routed wires are perfect, which is
+why fill goes in before the checks and before the GDS, never after. Look for
+the count it prints.
+
+Four checks, four different questions. Note that three take `-out_file` and one
+takes `-report`; that inconsistency is Cadence's, not a typo.
 
 Four checks, four different questions. Note that three take `-out_file` and one
 takes `-report`; that inconsistency is Cadence's, not a typo.
@@ -548,18 +641,20 @@ git bundle create ~/<your-username>-week9.bundle main..<your-username>
 Move the bundle off the chamber, plus:
 
 - `post-pnr.gds`, `post-pnr.def`, `post-pnr.v`, `post-pnr.spef`
-- `timing_postroute.rpt`, `area_postroute.rpt`
+- `timing_postroute.rpt`, `timing_postroute_hold.rpt`, `area_postroute.rpt`
 - `drc.rpt`, `conn.rpt`, `antenna.rpt`, `density.rpt`
 - A screenshot of the routed layout
-- Your three slack numbers in a row: Genus, Innovus pre-placement, Innovus
-  post-route. One sentence on what caused each change.
+- Your three setup slack numbers in a row: Genus, Innovus pre-placement,
+  Innovus post-route. One sentence on what caused each change. Your hold slack
+  and the corner it came from.
 - Whether your week 8 pin placement survived contact with the tool, and what you
   would change about it now
 
 ## Done means
 
-- The design routes with 0 DRC and 0 antenna violations
-- Your pins are on the edges you chose in week 8, and you can defend the choice
+- The design routes with 0 DRC and 0 antenna violations, with fillers in
+- Your pins are on the edges you chose in week 8, on the layer whose direction
+  matches the edge, and bit `i` in lines up with bit `i` out in `post-pnr.def`
 - `post-pnr.gds` exists and streamout reported the merge
 - `./run` reproduces the whole thing headless from a clean shell
 - You can point at the layout and say where power enters and how it reaches a cell
