@@ -18,6 +18,7 @@
 `include "uvm_macros.svh"
 import uvm_pkg::*;
 
+`include "pe_txn.sv"
 `include "pe_model.sv"      // your reference model from Half A, unchanged
 
 //------------------------------------------------------------------------
@@ -117,6 +118,10 @@ class pe_seq extends uvm_sequence #(pe_item);
       // that. The second half is what lets a sequence wait for a result and
       // decide what to send next.
 
+      start_item(it);
+      assert(it.randomize());
+      finish_item(it);
+
     end
   endtask
 endclass
@@ -151,6 +156,7 @@ class pe_driver extends uvm_driver #(pe_item);
 
   task run_phase(uvm_phase phase);
     pe_item it;
+    wait (vif.rst === 1'b0);
     forever begin
       seq_item_port.get_next_item(it);
       @(negedge vif.clk);
@@ -192,8 +198,9 @@ class pe_monitor extends uvm_monitor;
 
   task run_phase(uvm_phase phase);
     pe_item it;
+    wait (vif.rst === 1'b0);
     forever begin
-      @(negedge vif.clk);
+      @(posedge vif.clk);
       it = pe_item::type_id::create("it");
       it.weight     = vif.pe_weight_in;
       it.activation = vif.pe_input_in;
@@ -231,19 +238,19 @@ class pe_scoreboard extends uvm_subscriber #(pe_item);
     model.reset();
   endfunction
 
-  function void write(pe_item it);
+  function void write(pe_item t);
     bit signed [15:0] expected;
-    pe_txn t = new();
-    t.weight = it.weight; t.activation = it.activation; t.psum_in = it.psum_in;
-    t.accept_w = it.accept_w; t.switch = it.switch;
-    t.valid = it.valid; t.enabled = it.enabled;
+    pe_txn txn = new();
+    txn.weight = t.weight; txn.activation = t.activation; txn.psum_in = t.psum_in;
+    txn.accept_w = t.accept_w; txn.switch = t.switch;
+    txn.valid = t.valid; txn.enabled = t.enabled;
 
-    expected = model.step(t);
+    expected = model.step(txn);
     n_checked++;
-    if (it.psum_out !== expected) begin
+    if (t.psum_out !== expected) begin
       n_errors++;
       `uvm_error("SCB", $sformatf("#%0d %s exp=%0d got=%0d",
-                 n_checked, it.convert2string(), expected, it.psum_out))
+                 n_checked, t.convert2string(), expected, t.psum_out))
     end
   endfunction
 
@@ -322,7 +329,7 @@ class pe_test extends uvm_test;
     phase.raise_objection(this);
     seq = pe_seq::type_id::create("seq");
     seq.start(env.sqr);
-    #200;
+    wait (env.scb.n_checked == seq.n);
     phase.drop_objection(this);
   endtask
 endclass

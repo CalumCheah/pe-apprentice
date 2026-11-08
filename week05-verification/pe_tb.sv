@@ -53,7 +53,7 @@ module pe_tb;
   //----------------------------------------------------------------------
   mailbox #(pe_txn) gen2drv = new();
   mailbox #(pe_txn) drv2scb = new();
-  mailbox #(bit signed [DW-1:0]) mon2scb = new();
+  mailbox #(logic signed [DW-1:0]) mon2scb = new();
 
   pe_model model = new();
 
@@ -81,6 +81,8 @@ module pe_tb;
       // randomize() returns 0, and without the assert the testbench silently
       // drives whatever was in the object before and reports a pass.
 
+      assert (t.randomize());
+      gen2drv.put(t);
     end
   endtask
 
@@ -110,6 +112,13 @@ module pe_tb;
       // drv2scb so the scoreboard knows what was sent. The driver is the only
       // component allowed to drive anything; that restriction is what keeps
       // the monitor honest.
+      pe_psum_in      <= t.psum_in;
+      pe_valid_in     <= t.valid;
+      pe_enabled      <= t.enabled;
+      pe_accept_w_in  <= t.accept_w;
+      pe_switch_in    <= t.switch;
+
+      drv2scb.put(t);
 
     end
   endtask
@@ -145,7 +154,7 @@ module pe_tb;
   //======================================================================
   task automatic scoreboard();
     pe_txn t;
-    bit signed [DW-1:0] observed, expected;
+    logic signed [DW-1:0] observed, expected;
     forever begin
       drv2scb.get(t);          // what we sent
       mon2scb.get(observed);   // what came back
@@ -157,6 +166,14 @@ module pe_tb;
       // nothing at 1am; print the check number, `t.show()`, the expected
       // value and the observed one. Increment n_checked every time and
       // n_errors only on a failure, because the run loop waits on n_checked.
+
+      expected = model.step(t);
+      n_checked++;
+
+      if (observed !== expected) begin
+        $display("MISMATCH #%0d: %s expected=%0d observed=%0d", n_checked, t.show(), expected, observed);
+        n_errors++;
+      end
 
     end
   endtask
@@ -193,6 +210,8 @@ module pe_tb;
     // One of yours must cross cp_switch with cp_accept. That is week 2
     // question 5a made measurable: it tells you whether a weight and a
     // switch ever arrived on the same cycle in 500 transactions.
+    cr_switch_accept  : cross cp_switch, cp_accept;
+    cr_valid_switch   : cross cp_valid, cp_switch;
   endgroup
 
   cg cov = new();

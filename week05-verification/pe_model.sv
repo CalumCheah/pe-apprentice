@@ -83,8 +83,22 @@ class pe_model;
   // weight_bg before you use it you have modelled a PE that does not exist.
   // ----------------------------------------------------------------------
   function bit signed [DW-1:0] step(pe_txn t);
-    // your code
-    return '0;
+    bit signed [DW-1:0] expected;
+
+    expected = '0;
+    
+    if (t.switch) begin
+      weight_fg = weight_bg;
+    end
+    if (t.accept_w) begin
+      weight_bg = t.weight;
+    end
+
+    if (t.enabled && t.valid) begin
+      expected = q_add(q_mul(t.activation, weight_fg), t.psum_in);
+    end
+
+    return expected;
   endfunction
 
 endclass
